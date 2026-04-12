@@ -8,7 +8,7 @@ Target:      64–128 bit prime curve order (#E)
 from .utils import is_prime, generate_prime
 from .curve import EllipticCurve
 from .point import CurvePoint
-from .order import curve_order, is_secure_curve
+from .order import curve_order, is_secure_curve, find_prime_order_curve
 from .keygen import generate_keypair, ecdh_shared_secret
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "is_prime",
     "curve_order",
     "is_secure_curve",
+    "find_prime_order_curve",
     "generate_keypair",
     "ecdh_shared_secret",
 ]

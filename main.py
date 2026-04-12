@@ -14,7 +14,8 @@ import time
 from ecc.utils     import is_prime, generate_prime
 from ecc.curve     import EllipticCurve, generate_curve
 from ecc.point     import CurvePoint
-from ecc.order     import curve_order, is_secure_curve, find_generator
+from ecc.order     import (curve_order, is_secure_curve,
+                           find_generator, find_prime_order_curve)
 from ecc.keygen    import generate_keypair, ecdh_shared_secret
 
 
@@ -116,6 +117,50 @@ def spinner(msg: str, func, *args, **kwargs):
         i += 1
 
     print(f"\r  {c('✓', GREEN)}  {msg} — done.{' ' * 20}")
+    t.join()
+
+    if exc[0]:
+        raise exc[0]
+    return result[0]
+
+
+def spinner_with_counter(msg: str, func, *args, **kwargs):
+    """
+    Like spinner(), but the function receives a callback to report
+    the current attempt number.  The spinner updates to show it.
+    """
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    import threading
+
+    result   = [None]
+    exc      = [None]
+    done     = [False]
+    counter  = [0]     # shared attempt counter
+
+    def progress_callback(attempt, curve, order):
+        counter[0] = attempt
+
+    def worker():
+        try:
+            result[0] = func(*args, callback=progress_callback, **kwargs)
+        except Exception as e:
+            exc[0] = e
+        finally:
+            done[0] = True
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    i = 0
+    while not done[0]:
+        cnt = counter[0]
+        label = f"{msg} (attempt #{cnt})" if cnt > 0 else msg
+        print(f"\r  {c(frames[i % len(frames)], CYAN)}  {label} …{' ' * 10}", end="", flush=True)
+        time.sleep(0.1)
+        i += 1
+
+    cnt = counter[0]
+    print(f"\r  {c('✓', GREEN)}  {msg} — found after {cnt} attempts.{' ' * 20}")
     t.join()
 
     if exc[0]:
@@ -250,6 +295,69 @@ def step_security_check(curve: EllipticCurve, order: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Step 2+3+4 combined — Auto-search for prime-order curve
+# ---------------------------------------------------------------------------
+
+def step_auto_search(p: int) -> tuple[EllipticCurve, int]:
+    """
+    Automatically search for (a, b) such that the curve has prime order.
+    This replaces the manual generate→count→check→retry loop.
+    """
+    section("Step 2+3+4 — Auto-search for a prime-order curve")
+    print()
+    print("  Randomly sampling curve parameters (a, b) and counting #E")
+    print("  via Baby-step Giant-step until #E is prime and all security")
+    print("  checks pass.")
+    print()
+    bits = p.bit_length()
+    expected = int(bits * 0.693)   # ≈ ln(2) * bitlen ≈ ln(p)
+    info(f"Expected ~{expected} attempts for a {bits}-bit prime p.")
+    print()
+
+    result = spinner_with_counter(
+        "Searching for a secure, prime-order curve",
+        find_prime_order_curve, p, max_attempts=2000,
+    )
+
+    if result is None:
+        fail("Could not find a prime-order curve after 2000 attempts.")
+        fail("This is extremely unlikely — try a different prime p.")
+        sys.exit(1)
+
+    curve, order = result
+
+    print()
+    print(c("  Curve parameters:", BOLD))
+    info(f"a = {curve.a}")
+    info(f"b = {curve.b}")
+    info(f"Δ = 4a³ + 27b² = {curve._discriminant()}  (mod p)  ≠ 0 ✓")
+    print()
+    print(c("  Curve equation:", BOLD))
+    print(f"    y² ≡ x³  +  {curve.a}·x  +  {curve.b}  (mod {curve.p})")
+    print()
+    info(f"#E = {order}")
+    info(f"Bit-length of #E: {order.bit_length()} bits")
+
+    # Show all security checks
+    print()
+    checks = is_secure_curve(curve, order)
+    labels = {
+        "prime_order"      : "#E is prime            (cofactor h = 1, no small-subgroup attacks)",
+        "not_singular"     : "Curve is non-singular  (discriminant ≠ 0)",
+        "not_supersingular": "Not supersingular       (safe from MOV/Weil-pairing attack)",
+        "bit_range"        : f"#E bit-length in [64, 128]  (currently {checks['order_bits']} bits)",
+        "not_anomalous"    : "Not anomalous          (#E ≠ p, safe from SSSA/Smart attack)",
+    }
+    for key, label in labels.items():
+        tick(label)
+
+    print()
+    print(c("  ✓  All security checks passed — this is a cryptographically sound curve.", GREEN + BOLD))
+
+    return curve, order
+
+
+# ---------------------------------------------------------------------------
 # Step 5 — Generator point G
 # ---------------------------------------------------------------------------
 
@@ -338,23 +446,48 @@ def banner():
 def main():
     banner()
 
-    # Keep looping until we find a curve that passes all security checks
-    while True:
-        p     = step_choose_p()
-        curve = step_generate_curve(p)
-        order = step_count_order(curve)
-        ok    = step_security_check(curve, order)
+    # ── Choose p ──
+    p = step_choose_p()
 
-        if ok:
-            break
+    # ── Choose mode: manual or auto ──
+    section("Search Mode")
+    print()
+    print("  How would you like to find curve parameters?")
+    print()
+    print(c("    [1]", CYAN) + "  Manual — generate one (a,b), count #E, check if prime")
+    print(c("    [2]", CYAN) + "  Auto   — automatically search until a prime-order curve is found")
+    print()
+    mode = prompt_int("Choice (1 or 2)", lo=1, hi=2)
 
-        print()
-        warn("Curve did not pass all checks. Let's try again with different parameters.")
-        again = input(c("\n  Try again? [Y/n]: ", YELLOW)).strip().lower()
-        if again == "n":
+    if mode == 2:
+        # ── Auto-search mode ──
+        curve, order = step_auto_search(p)
+    else:
+        # ── Manual mode (original flow) ──
+        while True:
+            curve = step_generate_curve(p)
+            order = step_count_order(curve)
+            ok    = step_security_check(curve, order)
+
+            if ok:
+                break
+
             print()
-            info("Exiting. Goodbye!")
-            sys.exit(0)
+            warn("Curve did not pass all checks. Let's try again with different parameters.")
+            print()
+            print("  Options:")
+            print(c("    [1]", CYAN) + "  Retry with new random (a, b) for same p")
+            print(c("    [2]", CYAN) + "  Switch to auto-search mode")
+            print(c("    [3]", CYAN) + "  Quit")
+            print()
+            retry = prompt_int("Choice (1, 2, or 3)", lo=1, hi=3)
+            if retry == 3:
+                info("Exiting. Goodbye!")
+                sys.exit(0)
+            elif retry == 2:
+                curve, order = step_auto_search(p)
+                break
+            # else: retry == 1, loop continues
 
     G = step_find_generator(curve, order)
     step_ecdh(curve, G, order)

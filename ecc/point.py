@@ -216,7 +216,11 @@ class CurvePoint:
         if not isinstance(k, int):
             return NotImplemented
 
-        k = k % self.curve.p  # reduce modulo group order (if supplied)
+        # NOTE: Do NOT reduce k modulo p here.  The scalar must be the exact
+        # integer because the group order #E ≈ p (by Hasse) and reducing
+        # mod p would silently corrupt BSGS order-counting which uses k ≈ p.
+        if k < 0:
+            return (-k) * (-self)   # negate both scalar and point
 
         if k == 0:
             return CurvePoint.infinity(self.curve)
